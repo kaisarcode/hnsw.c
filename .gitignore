@@ -1,0 +1,6 @@
+hnsw
+*.exe
+*.so
+*.dll
+*.a
+*.o
