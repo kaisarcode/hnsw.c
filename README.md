@@ -1,6 +1,6 @@
 # hnsw - HNSW Vector Search
 
-A minimalist C library for fixed-dimension vector indexing with Approximate Nearest Neighbor (ANN) search using a Hierarchical Navigable Small World (HNSW) graph.
+A minimalist C library for fixed-dimension vector indexing with Approximate Nearest Neighbor search using a Hierarchical Navigable Small World (HNSW) graph.
 
 ---
 
