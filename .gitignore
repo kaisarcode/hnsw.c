@@ -1,6 +1,9 @@
-hnsw
-*.exe
-*.so
-*.dll
-*.a
+/hnsw
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
 *.o
+*.so
+*.a
