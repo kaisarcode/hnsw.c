@@ -327,7 +327,8 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
  */
 int kc_hnsw_search(const kc_hnsw_t *hnsw, const float *query, size_t limit, double threshold, kc_hnsw_result_t *out) {
     if (hnsw == NULL || query == NULL || (limit > 0 && out == NULL)) return KC_HNSW_EINVAL;
-    if (hnsw->count == 0 || limit == 0 || !hnsw->entry_point_set) return 0;
+    if (limit == 0 || hnsw->count == 0) return 0;
+    if (hnsw->count > 0 && !hnsw->entry_point_set) return KC_HNSW_ESTATE;
 
     double q_norm = kc_hnsw_vector_norm(query, hnsw->dimension);
     size_t curr_idx = hnsw->entry_point_idx;

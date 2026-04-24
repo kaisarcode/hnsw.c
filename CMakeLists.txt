@@ -7,8 +7,13 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # Performance optimizations
+option(HNSW_NATIVE "Optimize for native CPU architecture" OFF)
+
 if(NOT MSVC)
-    add_compile_options(-O3 -march=native -fno-finite-math-only)
+    add_compile_options(-O3 -fno-finite-math-only)
+    if(HNSW_NATIVE)
+        add_compile_options(-march=native)
+    endif()
     add_definitions(-D_GNU_SOURCE)
 else()
     add_compile_options(/O2)

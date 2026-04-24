@@ -69,6 +69,45 @@ kc_test_run_case() {
     return 1
 }
 
+# Verifies API state transitions.
+# @return Status code.
+kc_test_api_state() {
+    label='API state transition (ESTATE)'
+    test_src='api_test.c'
+    test_bin='./api_test'
+
+    {
+        printf '#include "hnsw.h"\n#include <stdio.h>\nint main() {\n'
+        printf '  kc_hnsw_t *hnsw = kc_hnsw_open(3, KC_HNSW_METRIC_COSINE);\n'
+        printf '  float v[] = {1, 0, 0};\n'
+        printf '  kc_hnsw_add(hnsw, "1", v);\n'
+        printf '  kc_hnsw_add(hnsw, "2", v);\n'
+        printf '  kc_hnsw_add(hnsw, "3", v);\n'
+        printf '  kc_hnsw_result_t res[3];\n'
+        printf '  int rc = kc_hnsw_search(hnsw, v, 3, 0.0, res);\n'
+        printf '  if (rc != %d) { fprintf(stderr, "Expected ESTATE\\n"); return 1; }\n' "-3"
+        printf '  kc_hnsw_build(hnsw);\n'
+        printf '  rc = kc_hnsw_search(hnsw, v, 3, 0.0, res);\n'
+        printf '  if (rc <= 0) { fprintf(stderr, "Expected positive results\\n"); return 1; }\n'
+        printf '  kc_hnsw_close(hnsw); return 0;\n}\n'
+    } > "$test_src"
+
+    ${CC:-cc} -O3 -o "$test_bin" "$test_src" libhnsw.c -lm -lpthread -I. >/dev/null 2>&1 || {
+        rm -f "$test_src" "$test_bin"
+        return 1
+    }
+
+    "$test_bin" >/dev/null 2>&1 || {
+        rm -f "$test_src" "$test_bin"
+        kc_test_fail "$label"
+        return 1
+    }
+
+    rm -f "$test_src" "$test_bin"
+    kc_test_pass "$label"
+    return 0
+}
+
 # Orchestrates the validation suite.
 # @return Status code.
 kc_test_main() {
@@ -99,6 +138,8 @@ kc_test_main() {
         'l2 approximate top-2' \
         'pink red' \
         ./hnsw -d 3 -i "$dataset_path" -q '0.7 0.1 0' -k 2 -m l2 || failed=$((failed + 1))
+
+    kc_test_api_state || failed=$((failed + 1))
 
     if [ "$failed" -eq 0 ]; then
         return 0

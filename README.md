@@ -28,6 +28,18 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Releas
 
 ---
 
+## Thread-Safety
+
+hnsw uses a **build-then-query** model:
+
+- Create the index, add all vectors, and call kc_hnsw_build() from one thread. During this build phase, the index is mutable and must not be accessed from other threads.
+- After kc_hnsw_build() returns KC_HNSW_OK, the index becomes read-only for search. At that point, multiple threads may call kc_hnsw_search() concurrently on the same kc_hnsw_t.
+- Each search thread must provide its own query buffer and its own result buffer.
+- Do not add vectors, reserve capacity, rebuild, or close the index while searches are running.
+- kc_hnsw_close() must be called only after all search threads have finished using the index.
+
+---
+
 ## Public API
 ```c
 #include "hnsw.h"
