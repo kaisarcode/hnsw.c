@@ -9,7 +9,7 @@
 # @param message Failure explanation.
 # @return 1.
 kc_test_fail() {
-    printf '[FAIL] %s\n' "$1"
+    printf '\033[31m[FAIL]\033[0m %s\n' "$1"
     return 1
 }
 
@@ -17,7 +17,7 @@ kc_test_fail() {
 # @param message Success label.
 # @return 0.
 kc_test_pass() {
-    printf '[PASS] %s\n' "$1"
+    printf '\033[32m[PASS]\033[0m %s\n' "$1"
     return 0
 }
 
@@ -25,7 +25,6 @@ kc_test_pass() {
 # @return Status code.
 kc_test_check_binary() {
     if [ ! -x "./hnsw" ]; then
-        printf '%s\n' '[ERROR] hnsw binary not found. Please compile first.'
         return 1
     fi
 
@@ -67,8 +66,6 @@ kc_test_run_case() {
     fi
 
     kc_test_fail "$label"
-    printf '%s\n' "Expected IDs: $expected_ids"
-    printf '%s\n' "Actual IDs: $actual_ids"
     return 1
 }
 
@@ -104,11 +101,9 @@ kc_test_main() {
         ./hnsw -d 3 -i "$dataset_path" -q '0.7 0.1 0' -k 2 -m l2 || failed=$((failed + 1))
 
     if [ "$failed" -eq 0 ]; then
-        printf '%s\n' '[SUCCESS] All hnsw HNSW validation tests passed!'
         return 0
     fi
 
-    printf '[FAILURE] %s tests failed.\n' "$failed"
     return 1
 }
 
