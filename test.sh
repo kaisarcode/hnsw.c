@@ -24,7 +24,7 @@ kc_test_pass() {
 # Verifies that the hnsw binary exists and is executable.
 # @return Status code.
 kc_test_check_binary() {
-    if [ ! -x "./hnsw" ]; then
+    if [ ! -x "./bin/x86_64/linux/hnsw" ]; then
         return 1
     fi
 
@@ -92,7 +92,7 @@ kc_test_api_state() {
         printf '  kc_hnsw_close(hnsw); return 0;\n}\n'
     } > "$test_src"
 
-    ${CC:-cc} -O3 -o "$test_bin" "$test_src" libhnsw.c -lm -lpthread -I. >/dev/null 2>&1 || {
+    ${CC:-cc} -O3 -o "$test_bin" "$test_src" src/libhnsw.c -lm -lpthread -Isrc >/dev/null 2>&1 || {
         rm -f "$test_src" "$test_bin"
         return 1
     }
@@ -117,6 +117,8 @@ kc_test_main() {
 
     kc_test_check_binary || exit 1
 
+    BIN="./bin/x86_64/linux/hnsw"
+
     temp_dir=$(mktemp -d)
     dataset_path="$temp_dir/vectors.txt"
 
@@ -127,17 +129,17 @@ kc_test_main() {
     kc_test_run_case \
         'cosine approximate top-2' \
         'red pink' \
-        ./hnsw -d 3 -i "$dataset_path" -q '1 0 0' -k 2 -m cosine || failed=$((failed + 1))
+        "$BIN" -d 3 -i "$dataset_path" -q '1 0 0' -k 2 -m cosine || failed=$((failed + 1))
 
     kc_test_run_case \
         'inner-product approximate top-1' \
         'red' \
-        ./hnsw -d 3 -i "$dataset_path" -q '0.7 0.1 0' -k 1 -m inner || failed=$((failed + 1))
+        "$BIN" -d 3 -i "$dataset_path" -q '0.7 0.1 0' -k 1 -m inner || failed=$((failed + 1))
 
     kc_test_run_case \
         'l2 approximate top-2' \
         'pink red' \
-        ./hnsw -d 3 -i "$dataset_path" -q '0.7 0.1 0' -k 2 -m l2 || failed=$((failed + 1))
+        "$BIN" -d 3 -i "$dataset_path" -q '0.7 0.1 0' -k 2 -m l2 || failed=$((failed + 1))
 
     kc_test_api_state || failed=$((failed + 1))
 
