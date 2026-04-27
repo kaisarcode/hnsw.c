@@ -13,10 +13,10 @@ set(CMAKE_C_STANDARD 11)
 ## ── Compiler flags ────────────────────────────────────────────────────────────
 
 if(NOT MSVC)
-    add_compile_options(-O3 -fno-finite-math-only)
+    add_compile_options(-O3 -Wall -Wextra -Werror -fno-finite-math-only)
     add_definitions(-D_GNU_SOURCE)
 else()
-    add_compile_options(/O2)
+    add_compile_options(/O2 /W3 /WX)
 endif()
 
 ## ── Include paths ─────────────────────────────────────────────────────────────
