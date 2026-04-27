@@ -47,7 +47,7 @@ kc_hnsw_t *kc_hnsw_open(size_t dimension, int metric);
 
 /**
  * Releases one vector index instance.
- * The caller must ensure no other thread is using the index.
+ * Must not be called while any other thread holds the index.
  * @param hnsw Index pointer.
  * @return No return value.
  */
@@ -55,6 +55,7 @@ void kc_hnsw_close(kc_hnsw_t *hnsw);
 
 /**
  * Reserves capacity for a target number of vectors.
+ * Acquires an exclusive write lock internally.
  * @param hnsw Index pointer.
  * @param capacity Target vector capacity.
  * @return Status code.
@@ -63,8 +64,7 @@ int kc_hnsw_reserve(kc_hnsw_t *hnsw, size_t capacity);
 
 /**
  * Inserts one vector and its identifier into the index.
- * This function mutates the index and must not be called concurrently 
- * with build/search on the same index.
+ * Acquires an exclusive write lock internally.
  * @param hnsw Index pointer.
  * @param id User-defined identifier string.
  * @param values Vector values with the configured dimension.
@@ -74,9 +74,9 @@ int kc_hnsw_add(kc_hnsw_t *hnsw, const char *id, const float *values);
 
 /**
  * Executes one top-K nearest-neighbor search.
- * This operation is read-only after the index is built. Concurrent 
- * searches are allowed only after kc_hnsw_build() succeeds. Each caller 
- * must use its own output buffer.
+ * Acquires a shared read lock internally. Concurrent calls from multiple
+ * threads are safe after kc_hnsw_build() completes. Each caller must
+ * supply its own output buffer.
  * @param hnsw Index pointer.
  * @param query Query vector.
  * @param limit Maximum number of results to write.
@@ -94,10 +94,9 @@ int kc_hnsw_search(
 );
 
 /**
- * Constructs the HNSW index from previously added vectors.
- * This phase is single-threaded and mutates the graph. After a 
- * successful build, the index is ready for read-only concurrent 
- * searches.
+ * Constructs the HNSW graph from previously added vectors.
+ * Acquires an exclusive write lock internally. After a successful build
+ * the index is ready for concurrent searches.
  * @param hnsw Index pointer.
  * @return Status code.
  */

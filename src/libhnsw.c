@@ -13,9 +13,16 @@
 #include "hnsw.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#ifndef _WIN32
+#include <pthread.h>
+#else
+#include <windows.h>
+#endif
 
 #define KC_HNSW_HNSW_M 16
 #define KC_HNSW_HNSW_EF_CONSTRUCTION 64
@@ -54,6 +61,12 @@ struct kc_hnsw {
     int M;
     int ef_construction;
     int ef_search;
+
+#ifndef _WIN32
+    pthread_rwlock_t rwlock;
+#else
+    SRWLOCK rwlock;
+#endif
 };
 
 /* Priority Queue / Heap for HNSW search */
@@ -89,6 +102,60 @@ static void kc_hnsw_neighbor_list_init(kc_hnsw_neighbor_list_t *list);
 static void kc_hnsw_neighbor_list_free(kc_hnsw_neighbor_list_t *list);
 
 /**
+ * Acquire a shared read lock on the index.
+ * @param hnsw Index pointer.
+ * @return KC_HNSW_OK on success, KC_HNSW_EINVAL on failure.
+ */
+static int kc_hnsw_rlock(kc_hnsw_t *hnsw) {
+#ifndef _WIN32
+    return pthread_rwlock_rdlock(&hnsw->rwlock) == 0 ? KC_HNSW_OK : KC_HNSW_EINVAL;
+#else
+    AcquireSRWLockShared(&hnsw->rwlock);
+    return KC_HNSW_OK;
+#endif
+}
+
+/**
+ * Acquire an exclusive write lock on the index.
+ * @param hnsw Index pointer.
+ * @return KC_HNSW_OK on success, KC_HNSW_EINVAL on failure.
+ */
+static int kc_hnsw_wlock(kc_hnsw_t *hnsw) {
+#ifndef _WIN32
+    return pthread_rwlock_wrlock(&hnsw->rwlock) == 0 ? KC_HNSW_OK : KC_HNSW_EINVAL;
+#else
+    AcquireSRWLockExclusive(&hnsw->rwlock);
+    return KC_HNSW_OK;
+#endif
+}
+
+/**
+ * Release a shared read lock on the index.
+ * @param hnsw Index pointer.
+ * @return No return value.
+ */
+static void kc_hnsw_runlock(kc_hnsw_t *hnsw) {
+#ifndef _WIN32
+    pthread_rwlock_unlock(&hnsw->rwlock);
+#else
+    ReleaseSRWLockShared(&hnsw->rwlock);
+#endif
+}
+
+/**
+ * Release an exclusive write lock on the index.
+ * @param hnsw Index pointer.
+ * @return No return value.
+ */
+static void kc_hnsw_wunlock(kc_hnsw_t *hnsw) {
+#ifndef _WIN32
+    pthread_rwlock_unlock(&hnsw->rwlock);
+#else
+    ReleaseSRWLockExclusive(&hnsw->rwlock);
+#endif
+}
+
+/**
  * Creates one vector index instance.
  * @param dimension Fixed vector dimension for all entries.
  * @param metric Configured similarity metric.
@@ -113,6 +180,15 @@ kc_hnsw_t *kc_hnsw_open(size_t dimension, int metric) {
     hnsw->M = KC_HNSW_HNSW_M;
     hnsw->ef_construction = KC_HNSW_HNSW_EF_CONSTRUCTION;
     hnsw->ef_search = KC_HNSW_HNSW_EF_SEARCH;
+
+#ifndef _WIN32
+    if (pthread_rwlock_init(&hnsw->rwlock, NULL) != 0) {
+        free(hnsw);
+        return NULL;
+    }
+#else
+    InitializeSRWLock(&hnsw->rwlock);
+#endif
 
     srand((unsigned int)time(NULL));
 
@@ -144,34 +220,52 @@ void kc_hnsw_close(kc_hnsw_t *hnsw) {
     }
 
     free(hnsw->items);
-    free (hnsw);
+#ifndef _WIN32
+    pthread_rwlock_destroy(&hnsw->rwlock);
+#endif
+    free(hnsw);
+}
+
+/**
+ * Reserves capacity without acquiring the lock.
+ * @param hnsw Index pointer.
+ * @param capacity Target vector capacity.
+ * @return Status code.
+ */
+static int kc_hnsw_reserve_locked(kc_hnsw_t *hnsw, size_t capacity) {
+    kc_hnsw_item_t *items;
+
+    if (capacity <= hnsw->capacity) {
+        return KC_HNSW_OK;
+    }
+    items = (kc_hnsw_item_t *)realloc(hnsw->items, capacity * sizeof(*items));
+    if (items == NULL) {
+        return KC_HNSW_ENOMEM;
+    }
+    hnsw->items = items;
+    hnsw->capacity = capacity;
+    return KC_HNSW_OK;
 }
 
 /**
  * Reserves capacity for a target number of vectors.
+ * Acquires an exclusive write lock internally.
  * @param hnsw Index pointer.
  * @param capacity Target vector capacity.
  * @return Status code.
  */
 int kc_hnsw_reserve(kc_hnsw_t *hnsw, size_t capacity) {
-    kc_hnsw_item_t *items;
+    int rc;
 
     if (hnsw == NULL) {
         return KC_HNSW_EINVAL;
     }
-
-    if (capacity <= hnsw->capacity) {
-        return KC_HNSW_OK;
+    if (kc_hnsw_wlock(hnsw) != KC_HNSW_OK) {
+        return KC_HNSW_EINVAL;
     }
-
-    items = (kc_hnsw_item_t *)realloc(hnsw->items, capacity * sizeof(*items));
-    if (items == NULL) {
-        return KC_HNSW_ENOMEM;
-    }
-
-    hnsw->items = items;
-    hnsw->capacity = capacity;
-    return KC_HNSW_OK;
+    rc = kc_hnsw_reserve_locked(hnsw, capacity);
+    kc_hnsw_wunlock(hnsw);
+    return rc;
 }
 
 /**
@@ -189,22 +283,28 @@ int kc_hnsw_add(kc_hnsw_t *hnsw, const char *id, const float *values) {
     if (hnsw == NULL || id == NULL || id[0] == '\0' || values == NULL) {
         return KC_HNSW_EINVAL;
     }
+    if (kc_hnsw_wlock(hnsw) != KC_HNSW_OK) {
+        return KC_HNSW_EINVAL;
+    }
 
     if (hnsw->count == hnsw->capacity) {
         next_capacity = hnsw->capacity == 0 ? 8 : hnsw->capacity * 2;
-        if (kc_hnsw_reserve(hnsw, next_capacity) != KC_HNSW_OK) {
+        if (kc_hnsw_reserve_locked(hnsw, next_capacity) != KC_HNSW_OK) {
+            kc_hnsw_wunlock(hnsw);
             return KC_HNSW_ENOMEM;
         }
     }
 
     id_copy = kc_hnsw_strdup(id);
     if (id_copy == NULL) {
+        kc_hnsw_wunlock(hnsw);
         return KC_HNSW_ENOMEM;
     }
 
     copy = (float *)malloc(hnsw->dimension * sizeof(*copy));
     if (copy == NULL) {
         free(id_copy);
+        kc_hnsw_wunlock(hnsw);
         return KC_HNSW_ENOMEM;
     }
 
@@ -217,6 +317,7 @@ int kc_hnsw_add(kc_hnsw_t *hnsw, const char *id, const float *values) {
     hnsw->items[hnsw->count].neighbors = NULL;
     hnsw->count++;
 
+    kc_hnsw_wunlock(hnsw);
     return KC_HNSW_OK;
 }
 
@@ -227,7 +328,11 @@ int kc_hnsw_add(kc_hnsw_t *hnsw, const char *id, const float *values) {
  */
 int kc_hnsw_build(kc_hnsw_t *hnsw) {
     if (hnsw == NULL) return KC_HNSW_EINVAL;
-    if (hnsw->count == 0) return KC_HNSW_OK;
+    if (kc_hnsw_wlock(hnsw) != KC_HNSW_OK) return KC_HNSW_EINVAL;
+    if (hnsw->count == 0) {
+        kc_hnsw_wunlock(hnsw);
+        return KC_HNSW_OK;
+    }
 
     /* Reset graph if already built */
     for (size_t i = 0; i < hnsw->count; i++) {
@@ -313,6 +418,7 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
         }
     }
 
+    kc_hnsw_wunlock(hnsw);
     return KC_HNSW_OK;
 }
 
@@ -326,9 +432,17 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
  * @return Number of results written, or a negative status code on failure.
  */
 int kc_hnsw_search(const kc_hnsw_t *hnsw, const float *query, size_t limit, double threshold, kc_hnsw_result_t *out) {
+    kc_hnsw_t *mhnsw = (kc_hnsw_t *)(uintptr_t)hnsw;
     if (hnsw == NULL || query == NULL || (limit > 0 && out == NULL)) return KC_HNSW_EINVAL;
-    if (limit == 0 || hnsw->count == 0) return 0;
-    if (hnsw->count > 0 && !hnsw->entry_point_set) return KC_HNSW_ESTATE;
+    if (kc_hnsw_rlock(mhnsw) != KC_HNSW_OK) return KC_HNSW_EINVAL;
+    if (limit == 0 || hnsw->count == 0) {
+        kc_hnsw_runlock(mhnsw);
+        return 0;
+    }
+    if (hnsw->count > 0 && !hnsw->entry_point_set) {
+        kc_hnsw_runlock(mhnsw);
+        return KC_HNSW_ESTATE;
+    }
 
     double q_norm = kc_hnsw_vector_norm(query, hnsw->dimension);
     size_t curr_idx = hnsw->entry_point_idx;
@@ -383,6 +497,7 @@ int kc_hnsw_search(const kc_hnsw_t *hnsw, const float *query, size_t limit, doub
 
     free(results);
     kc_hnsw_heap_destroy(top_k);
+    kc_hnsw_runlock(mhnsw);
     return (int)written;
 }
 

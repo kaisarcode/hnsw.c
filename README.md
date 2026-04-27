@@ -73,19 +73,12 @@ kc_hnsw_search(hnsw, query, limit, threshold, results);
 kc_hnsw_close(hnsw);
 ```
 
-## Threading Model
-
-Build-then-query — single writer phase, concurrent readers after `kc_hnsw_build()`.
-
-- Add all vectors and call `kc_hnsw_build()` from one thread.
-- After `kc_hnsw_build()` returns `KC_HNSW_OK`, multiple threads may call `kc_hnsw_search()` concurrently on the same `kc_hnsw_t`. Each caller must provide its own result buffer.
-- Do not add vectors, reserve capacity, rebuild, or close the index while searches are running.
-- `kc_hnsw_close()` must be called only after all search threads have finished.
-
 ## Lifecycle
 
 - `kc_hnsw_open()` — allocates and returns an index owned by the caller.
-- `kc_hnsw_close()` — releases the index. Must not be called while searches are active.
+- `kc_hnsw_close()` — releases the index. Must not be called while any other thread holds the index.
+- `kc_hnsw_add()` and `kc_hnsw_build()` acquire an exclusive write lock. No other operation may run concurrently with them.
+- `kc_hnsw_search()` acquires a shared read lock. Multiple threads may search the same index concurrently after `kc_hnsw_build()` completes.
 
 ---
 
