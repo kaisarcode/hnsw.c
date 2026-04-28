@@ -69,7 +69,6 @@ struct kc_hnsw {
 #endif
 };
 
-/* Priority Queue / Heap for HNSW search */
 typedef struct {
     size_t idx;
     double score;
@@ -80,7 +79,7 @@ typedef struct {
     size_t size;
     size_t capacity;
     int metric;
-    int is_max_heap; /* 1 for max-heap, 0 for min-heap */
+    int worst_first;
 } kc_hnsw_heap_t;
 
 static char *kc_hnsw_strdup(const char *text);
@@ -90,14 +89,16 @@ static double kc_hnsw_inner_product(const float *left, const float *right, size_
 static double kc_hnsw_dist(const kc_hnsw_t *hnsw, const float *v1, double n1, const float *v2, double n2);
 
 static int kc_hnsw_random_level(void);
-static kc_hnsw_heap_t *kc_hnsw_heap_create(size_t capacity, int metric, int is_max_heap);
+static kc_hnsw_heap_t *kc_hnsw_heap_create(size_t capacity, int metric, int worst_first);
 static void kc_hnsw_heap_destroy(kc_hnsw_heap_t *heap);
-static void kc_hnsw_heap_push(kc_hnsw_heap_t *heap, size_t idx, double score);
+static int kc_hnsw_heap_push(kc_hnsw_heap_t *heap, size_t idx, double score);
 static kc_hnsw_node_score_t kc_hnsw_heap_pop(kc_hnsw_heap_t *heap);
-static int kc_hnsw_heap_is_better(int metric, double s1, double s2, int is_max_heap);
+static int score_better(int metric, double a, double b);
+static int score_worse(int metric, double a, double b);
+static int kc_hnsw_heap_has_priority(int metric, double s1, double s2, int worst_first);
 
-static void kc_hnsw_search_level(const kc_hnsw_t *hnsw, const float *query, double query_norm, size_t entry_idx, int level, int ef, kc_hnsw_heap_t *results);
-static void kc_hnsw_add_edge(kc_hnsw_t *hnsw, size_t src_idx, size_t dst_idx, int level);
+static int kc_hnsw_search_level(const kc_hnsw_t *hnsw, const float *query, double query_norm, size_t entry_idx, int level, int ef, kc_hnsw_heap_t *results);
+static int kc_hnsw_add_edge(kc_hnsw_t *hnsw, size_t src_idx, size_t dst_idx, int level);
 static void kc_hnsw_neighbor_list_init(kc_hnsw_neighbor_list_t *list);
 static void kc_hnsw_neighbor_list_free(kc_hnsw_neighbor_list_t *list);
 
@@ -180,6 +181,14 @@ kc_hnsw_t *kc_hnsw_open(size_t dimension, int metric) {
     hnsw->M = KC_HNSW_HNSW_M;
     hnsw->ef_construction = KC_HNSW_HNSW_EF_CONSTRUCTION;
     hnsw->ef_search = KC_HNSW_HNSW_EF_SEARCH;
+
+    const char *env_ef = getenv("HNSW_EF_SEARCH");
+    if (env_ef != NULL) {
+        int ef = atoi(env_ef);
+        if (ef > 0) {
+            hnsw->ef_search = ef;
+        }
+    }
 
 #ifndef _WIN32
     if (pthread_rwlock_init(&hnsw->rwlock, NULL) != 0) {
@@ -334,7 +343,6 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
         return KC_HNSW_OK;
     }
 
-    /* Reset graph if already built */
     for (size_t i = 0; i < hnsw->count; i++) {
         if (hnsw->items[i].neighbors) {
             for (int j = 0; j <= hnsw->items[i].level; j++) {
@@ -347,7 +355,6 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
     hnsw->max_level = -1;
     hnsw->entry_point_set = 0;
 
-    /* Shuffle for better graph balance */
     for (size_t i = 0; i < hnsw->count; i++) {
         size_t j = i + rand() % (hnsw->count - i);
         kc_hnsw_item_t temp = hnsw->items[i];
@@ -359,6 +366,10 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
         int level = kc_hnsw_random_level();
         hnsw->items[i].level = level;
         hnsw->items[i].neighbors = (kc_hnsw_neighbor_list_t *)calloc(level + 1, sizeof(kc_hnsw_neighbor_list_t));
+        if (!hnsw->items[i].neighbors) {
+            kc_hnsw_wunlock(hnsw);
+            return KC_HNSW_ENOMEM;
+        }
         for (int j = 0; j <= level; j++) {
             kc_hnsw_neighbor_list_init(&hnsw->items[i].neighbors[j]);
         }
@@ -373,7 +384,6 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
         size_t curr_idx = hnsw->entry_point_idx;
         double curr_dist = kc_hnsw_dist(hnsw, hnsw->items[i].values, hnsw->items[i].norm, hnsw->items[curr_idx].values, hnsw->items[curr_idx].norm);
 
-        /* 1. Greedy descent to level */
         for (int l = hnsw->max_level; l > level; l--) {
             int changed = 1;
             while (changed) {
@@ -382,7 +392,7 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
                 for (size_t n = 0; n < neighbors->count; n++) {
                     size_t neighbor_idx = neighbors->edges[n].target_idx;
                     double d = kc_hnsw_dist(hnsw, hnsw->items[i].values, hnsw->items[i].norm, hnsw->items[neighbor_idx].values, hnsw->items[neighbor_idx].norm);
-                    if (kc_hnsw_heap_is_better(hnsw->metric, d, curr_dist, 0)) {
+                    if (score_better(hnsw->metric, d, curr_dist)) {
                         curr_dist = d;
                         curr_idx = neighbor_idx;
                         changed = 1;
@@ -391,17 +401,49 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
             }
         }
 
-        /* 2. Insert into levels */
         for (int l = (level < hnsw->max_level ? level : hnsw->max_level); l >= 0; l--) {
-            kc_hnsw_heap_t *candidates = kc_hnsw_heap_create(hnsw->ef_construction, hnsw->metric, 0);
-            kc_hnsw_search_level(hnsw, hnsw->items[i].values, hnsw->items[i].norm, curr_idx, l, hnsw->ef_construction, candidates);
+            kc_hnsw_heap_t *candidates = kc_hnsw_heap_create(hnsw->ef_construction, hnsw->metric, 1);
+            if (!candidates) {
+                kc_hnsw_wunlock(hnsw);
+                return KC_HNSW_ENOMEM;
+            }
+            if (kc_hnsw_search_level(hnsw, hnsw->items[i].values, hnsw->items[i].norm, curr_idx, l, hnsw->ef_construction, candidates) != KC_HNSW_OK) {
+                kc_hnsw_heap_destroy(candidates);
+                kc_hnsw_wunlock(hnsw);
+                return KC_HNSW_ENOMEM;
+            }
             
-            /* Connect to top M neighbors */
+            size_t c_size = candidates->size;
+            kc_hnsw_node_score_t *sorted = (kc_hnsw_node_score_t *)malloc(c_size * sizeof(kc_hnsw_node_score_t));
+            if (!sorted && c_size > 0) {
+                kc_hnsw_heap_destroy(candidates);
+                kc_hnsw_wunlock(hnsw);
+                return KC_HNSW_ENOMEM;
+            }
+            for (size_t k = 0; k < c_size; k++) {
+                sorted[k] = candidates->data[k];
+            }
+            
+            for (size_t x = 0; x < c_size; x++) {
+                for (size_t y = x + 1; y < c_size; y++) {
+                    if (score_worse(hnsw->metric, sorted[x].score, sorted[y].score)) {
+                        kc_hnsw_node_score_t tmp = sorted[x];
+                        sorted[x] = sorted[y];
+                        sorted[y] = tmp;
+                    }
+                }
+            }
+
             int connected = 0;
-            while (candidates->size > 0 && connected < hnsw->M) {
-                kc_hnsw_node_score_t best = kc_hnsw_heap_pop(candidates);
-                kc_hnsw_add_edge(hnsw, i, best.idx, l);
-                kc_hnsw_add_edge(hnsw, best.idx, i, l);
+            for (size_t k = 0; k < c_size && connected < hnsw->M; k++) {
+                kc_hnsw_node_score_t best = sorted[k];
+                if (kc_hnsw_add_edge(hnsw, i, best.idx, l) != KC_HNSW_OK ||
+                    kc_hnsw_add_edge(hnsw, best.idx, i, l) != KC_HNSW_OK) {
+                    free(sorted);
+                    kc_hnsw_heap_destroy(candidates);
+                    kc_hnsw_wunlock(hnsw);
+                    return KC_HNSW_ENOMEM;
+                }
                 
                 if (connected == 0) {
                     curr_idx = best.idx;
@@ -409,6 +451,7 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
                 }
                 connected++;
             }
+            free(sorted);
             kc_hnsw_heap_destroy(candidates);
         }
 
@@ -448,7 +491,6 @@ int kc_hnsw_search(const kc_hnsw_t *hnsw, const float *query, size_t limit, doub
     size_t curr_idx = hnsw->entry_point_idx;
     double curr_dist = kc_hnsw_dist(hnsw, query, q_norm, hnsw->items[curr_idx].values, hnsw->items[curr_idx].norm);
 
-    /* 1. Greedy descent to level 0 */
     for (int l = hnsw->max_level; l > 0; l--) {
         int changed = 1;
         while (changed) {
@@ -457,7 +499,7 @@ int kc_hnsw_search(const kc_hnsw_t *hnsw, const float *query, size_t limit, doub
             for (size_t n = 0; n < neighbors->count; n++) {
                 size_t neighbor_idx = neighbors->edges[n].target_idx;
                 double d = kc_hnsw_dist(hnsw, query, q_norm, hnsw->items[neighbor_idx].values, hnsw->items[neighbor_idx].norm);
-                if (kc_hnsw_heap_is_better(hnsw->metric, d, curr_dist, 0)) {
+                if (score_better(hnsw->metric, d, curr_dist)) {
                     curr_dist = d;
                     curr_idx = neighbor_idx;
                     changed = 1;
@@ -466,15 +508,24 @@ int kc_hnsw_search(const kc_hnsw_t *hnsw, const float *query, size_t limit, doub
         }
     }
 
-    /* 2. Best-first search at level 0 */
     kc_hnsw_heap_t *top_k = kc_hnsw_heap_create(hnsw->ef_search, hnsw->metric, 1);
-    kc_hnsw_search_level(hnsw, query, q_norm, curr_idx, 0, hnsw->ef_search, top_k);
+    if (!top_k) {
+        kc_hnsw_runlock(mhnsw);
+        return KC_HNSW_ENOMEM;
+    }
+    if (kc_hnsw_search_level(hnsw, query, q_norm, curr_idx, 0, hnsw->ef_search, top_k) != KC_HNSW_OK) {
+        kc_hnsw_heap_destroy(top_k);
+        kc_hnsw_runlock(mhnsw);
+        return KC_HNSW_ENOMEM;
+    }
 
-    /* 3. Filter and return */
     size_t written = 0;
-    /* We need to extract from max-heap and reverse to get best first, OR just extract all and sort. */
-    /* Actually our heap is a max-heap of size K, so popping will give us worst to best. */
     kc_hnsw_node_score_t *results = (kc_hnsw_node_score_t *)malloc(top_k->size * sizeof(kc_hnsw_node_score_t));
+    if (!results && top_k->size > 0) {
+        kc_hnsw_heap_destroy(top_k);
+        kc_hnsw_runlock(mhnsw);
+        return KC_HNSW_ENOMEM;
+    }
     size_t res_count = top_k->size;
     for (int i = (int)res_count - 1; i >= 0; i--) {
         results[i] = kc_hnsw_heap_pop(top_k);
@@ -501,8 +552,6 @@ int kc_hnsw_search(const kc_hnsw_t *hnsw, const float *query, size_t limit, doub
     return (int)written;
 }
 
-/* Internal implementation */
-
 /**
  * Performs a search at a specific HNSW level.
  * @param hnsw Index pointer.
@@ -512,27 +561,34 @@ int kc_hnsw_search(const kc_hnsw_t *hnsw, const float *query, size_t limit, doub
  * @param level Graph level to search.
  * @param ef Search budget (ef).
  * @param results Output heap to store found nodes.
- * @return No return value.
+ * @return Status code.
  */
-static void kc_hnsw_search_level(const kc_hnsw_t *hnsw, const float *query, double query_norm, size_t entry_idx, int level, int ef, kc_hnsw_heap_t *results) {
-    kc_hnsw_heap_t *candidates = kc_hnsw_heap_create(ef * 2, hnsw->metric, 0); /* min-heap */
+static int kc_hnsw_search_level(const kc_hnsw_t *hnsw, const float *query, double query_norm, size_t entry_idx, int level, int ef, kc_hnsw_heap_t *results) {
+    kc_hnsw_heap_t *candidates = kc_hnsw_heap_create(ef * 2, hnsw->metric, 0);
+    if (!candidates) return KC_HNSW_ENOMEM;
+    
     char *visited = (char *)calloc(hnsw->count, 1);
+    if (!visited) {
+        kc_hnsw_heap_destroy(candidates);
+        return KC_HNSW_ENOMEM;
+    }
 
     double d = kc_hnsw_dist(hnsw, query, query_norm, hnsw->items[entry_idx].values, hnsw->items[entry_idx].norm);
-    kc_hnsw_heap_push(candidates, entry_idx, d);
-    kc_hnsw_heap_push(results, entry_idx, d);
+    if (kc_hnsw_heap_push(candidates, entry_idx, d) != KC_HNSW_OK ||
+        kc_hnsw_heap_push(results, entry_idx, d) != KC_HNSW_OK) {
+        free(visited);
+        kc_hnsw_heap_destroy(candidates);
+        return KC_HNSW_ENOMEM;
+    }
     visited[entry_idx] = 1;
 
     while (candidates->size > 0) {
         kc_hnsw_node_score_t c = kc_hnsw_heap_pop(candidates);
         
-        /* results is a max-heap of size ef (worst candidate at top) */
-        /* If current candidate is worse than the worst result, we can stop if it's greedy enough, */
-        /* but here we follow ef. */
         kc_hnsw_node_score_t worst_res = results->data[0];
-        if (kc_hnsw_heap_is_better(hnsw->metric, c.score, worst_res.score, 1)) {
-            /* In HNSW, if c is farther than the furthest in results, we might skip, but let's be thorough */
-            /* Actually, if c.score is worse than worst_res.score, we don't necessarily stop yet because we explore neighbors. */
+        if (results->size >= (size_t)ef &&
+            score_worse(hnsw->metric, c.score, worst_res.score)) {
+            break;
         }
 
         kc_hnsw_neighbor_list_t *neighbors = &hnsw->items[c.idx].neighbors[level];
@@ -543,9 +599,13 @@ static void kc_hnsw_search_level(const kc_hnsw_t *hnsw, const float *query, doub
                 double v_dist = kc_hnsw_dist(hnsw, query, query_norm, hnsw->items[v_idx].values, hnsw->items[v_idx].norm);
                 
                 worst_res = results->data[0];
-                if (results->size < (size_t)ef || kc_hnsw_heap_is_better(hnsw->metric, v_dist, worst_res.score, 0)) {
-                    kc_hnsw_heap_push(candidates, v_idx, v_dist);
-                    kc_hnsw_heap_push(results, v_idx, v_dist);
+                if (results->size < (size_t)ef || score_better(hnsw->metric, v_dist, worst_res.score)) {
+                    if (kc_hnsw_heap_push(candidates, v_idx, v_dist) != KC_HNSW_OK ||
+                        kc_hnsw_heap_push(results, v_idx, v_dist) != KC_HNSW_OK) {
+                        free(visited);
+                        kc_hnsw_heap_destroy(candidates);
+                        return KC_HNSW_ENOMEM;
+                    }
                     if (results->size > (size_t)ef) {
                         kc_hnsw_heap_pop(results);
                     }
@@ -556,6 +616,7 @@ static void kc_hnsw_search_level(const kc_hnsw_t *hnsw, const float *query, doub
 
     free(visited);
     kc_hnsw_heap_destroy(candidates);
+    return KC_HNSW_OK;
 }
 
 /**
@@ -564,24 +625,24 @@ static void kc_hnsw_search_level(const kc_hnsw_t *hnsw, const float *query, doub
  * @param src_idx Source node index.
  * @param dst_idx Destination node index.
  * @param level Graph level.
- * @return No return value.
+ * @return Status code.
  */
-static void kc_hnsw_add_edge(kc_hnsw_t *hnsw, size_t src_idx, size_t dst_idx, int level) {
+static int kc_hnsw_add_edge(kc_hnsw_t *hnsw, size_t src_idx, size_t dst_idx, int level) {
     kc_hnsw_neighbor_list_t *list = &hnsw->items[src_idx].neighbors[level];
     
-    /* Check if already exists */
     for (size_t i = 0; i < list->count; i++) {
-        if (list->edges[i].target_idx == dst_idx) return;
+        if (list->edges[i].target_idx == dst_idx) return KC_HNSW_OK;
     }
 
     if (list->count == list->capacity) {
         size_t next_cap = list->capacity == 0 ? 4 : list->capacity * 2;
-        list->edges = (kc_hnsw_edge_t *)realloc(list->edges, next_cap * sizeof(kc_hnsw_edge_t));
+        kc_hnsw_edge_t *tmp = (kc_hnsw_edge_t *)realloc(list->edges, next_cap * sizeof(kc_hnsw_edge_t));
+        if (!tmp) return KC_HNSW_ENOMEM;
+        list->edges = tmp;
         list->capacity = next_cap;
     }
     list->edges[list->count++].target_idx = dst_idx;
 
-    /* Pruning: if count > M_max, keep only top M_max. */
     size_t M_max = (level == 0) ? (size_t)hnsw->M * 2 : (size_t)hnsw->M;
     if (list->count > M_max) {
         int worst_idx = -1;
@@ -591,7 +652,7 @@ static void kc_hnsw_add_edge(kc_hnsw_t *hnsw, size_t src_idx, size_t dst_idx, in
             size_t n_idx = list->edges[i].target_idx;
             double s = kc_hnsw_dist(hnsw, hnsw->items[src_idx].values, hnsw->items[src_idx].norm,
                     hnsw->items[n_idx].values, hnsw->items[n_idx].norm);
-            if (worst_idx == -1 || kc_hnsw_heap_is_better(hnsw->metric, s, worst_score, 1)) {
+            if (worst_idx == -1 || score_worse(hnsw->metric, s, worst_score)) {
                 worst_score = s;
                 worst_idx = (int)i;
             }
@@ -602,6 +663,7 @@ static void kc_hnsw_add_edge(kc_hnsw_t *hnsw, size_t src_idx, size_t dst_idx, in
             list->count--;
         }
     }
+    return KC_HNSW_OK;
 }
 
 /**
@@ -638,22 +700,25 @@ static void kc_hnsw_neighbor_list_free(kc_hnsw_neighbor_list_t *list) {
     free(list->edges);
 }
 
-/* Heap Implementation */
-
 /**
  * Creates a new priority heap.
  * @param capacity Initial capacity.
  * @param metric Metric constant.
- * @param is_max_heap Flag for max-heap (1) or min-heap (0).
+ * @param worst_first Flag to keep worst element at top (1) or best at top (0).
  * @return Heap pointer.
  */
-static kc_hnsw_heap_t *kc_hnsw_heap_create(size_t capacity, int metric, int is_max_heap) {
+static kc_hnsw_heap_t *kc_hnsw_heap_create(size_t capacity, int metric, int worst_first) {
     kc_hnsw_heap_t *heap = (kc_hnsw_heap_t *)malloc(sizeof(kc_hnsw_heap_t));
+    if (!heap) return NULL;
     heap->data = (kc_hnsw_node_score_t *)malloc(capacity * sizeof(kc_hnsw_node_score_t));
+    if (!heap->data) {
+        free(heap);
+        return NULL;
+    }
     heap->size = 0;
     heap->capacity = capacity;
     heap->metric = metric;
-    heap->is_max_heap = is_max_heap;
+    heap->worst_first = worst_first;
     return heap;
 }
 
@@ -668,19 +733,40 @@ static void kc_hnsw_heap_destroy(kc_hnsw_heap_t *heap) {
 }
 
 /**
- * Compares two scores based on metric and heap type.
+ * Checks if one score is better than another.
+ * @param metric Metric constant.
+ * @param a First score.
+ * @param b Second score.
+ * @return 1 if a is better than b, 0 otherwise.
+ */
+static int score_better(int metric, double a, double b) {
+    if (metric == KC_HNSW_METRIC_L2) return a < b;
+    return a > b;
+}
+
+/**
+ * Checks if one score is worse than another.
+ * @param metric Metric constant.
+ * @param a First score.
+ * @param b Second score.
+ * @return 1 if a is worse than b, 0 otherwise.
+ */
+static int score_worse(int metric, double a, double b) {
+    if (metric == KC_HNSW_METRIC_L2) return a > b;
+    return a < b;
+}
+
+/**
+ * Checks if a score has priority to move up the heap.
  * @param metric Metric constant.
  * @param s1 First score.
  * @param s2 Second score.
- * @param is_max_heap Flag for max-heap (1) or min-heap (0).
- * @return 1 if s1 is better than s2, or 0 otherwise.
+ * @param worst_first Flag to keep worst element at top.
+ * @return 1 if s1 has priority over s2, 0 otherwise.
  */
-static int kc_hnsw_heap_is_better(int metric, double s1, double s2, int is_max_heap) {
-    if (metric == KC_HNSW_METRIC_L2) {
-        return is_max_heap ? (s1 > s2) : (s1 < s2);
-    } else {
-        return is_max_heap ? (s1 < s2) : (s1 > s2);
-    }
+static int kc_hnsw_heap_has_priority(int metric, double s1, double s2, int worst_first) {
+    if (worst_first) return score_worse(metric, s1, s2);
+    return score_better(metric, s1, s2);
 }
 
 /**
@@ -688,28 +774,34 @@ static int kc_hnsw_heap_is_better(int metric, double s1, double s2, int is_max_h
  * @param heap Heap pointer.
  * @param idx Node index.
  * @param score Similarity score or distance.
- * @return No return value.
+ * @return Status code.
  */
-static void kc_hnsw_heap_push(kc_hnsw_heap_t *heap, size_t idx, double score) {
+static int kc_hnsw_heap_push(kc_hnsw_heap_t *heap, size_t idx, double score) {
     if (heap->size == heap->capacity) {
-        heap->capacity *= 2;
-        heap->data = (kc_hnsw_node_score_t *)realloc(heap->data, heap->capacity * sizeof(kc_hnsw_node_score_t));
+        size_t next_cap = heap->capacity * 2;
+        kc_hnsw_node_score_t *tmp = (kc_hnsw_node_score_t *)realloc(heap->data, next_cap * sizeof(kc_hnsw_node_score_t));
+        if (!tmp) return KC_HNSW_ENOMEM;
+        heap->data = tmp;
+        heap->capacity = next_cap;
     }
     size_t i = heap->size++;
     while (i > 0) {
         size_t p = (i - 1) / 2;
-        if (!kc_hnsw_heap_is_better(heap->metric, score, heap->data[p].score, heap->is_max_heap)) break;
+        if (!kc_hnsw_heap_has_priority(heap->metric, score, heap->data[p].score, heap->worst_first)) break;
         heap->data[i] = heap->data[p];
         i = p;
     }
     heap->data[i].idx = idx;
     heap->data[i].score = score;
+    return KC_HNSW_OK;
 }
 
 /**
- * Pops the best node from the heap.
+ * Pops and returns the heap root.
+ * The root is best-first when worst_first is 0.
+ * The root is worst-first when worst_first is 1.
  * @param heap Heap pointer.
- * @return Best node score structure.
+ * @return Root node score structure.
  */
 static kc_hnsw_node_score_t kc_hnsw_heap_pop(kc_hnsw_heap_t *heap) {
     kc_hnsw_node_score_t top = heap->data[0];
@@ -717,16 +809,14 @@ static kc_hnsw_node_score_t kc_hnsw_heap_pop(kc_hnsw_heap_t *heap) {
     size_t i = 0;
     while (i * 2 + 1 < heap->size) {
         size_t c = i * 2 + 1;
-        if (c + 1 < heap->size && kc_hnsw_heap_is_better(heap->metric, heap->data[c+1].score, heap->data[c].score, heap->is_max_heap)) c++;
-        if (!kc_hnsw_heap_is_better(heap->metric, heap->data[c].score, last.score, heap->is_max_heap)) break;
+        if (c + 1 < heap->size && kc_hnsw_heap_has_priority(heap->metric, heap->data[c+1].score, heap->data[c].score, heap->worst_first)) c++;
+        if (!kc_hnsw_heap_has_priority(heap->metric, heap->data[c].score, last.score, heap->worst_first)) break;
         heap->data[i] = heap->data[c];
         i = c;
     }
     heap->data[i] = last;
     return top;
 }
-
-/* Existing utility functions from libhnsw.c */
 
 /**
  * Duplicates one string into heap memory.

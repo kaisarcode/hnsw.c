@@ -89,6 +89,19 @@ kc_test_write_dataset() {
     return 0
 }
 
+# Writes a tiny dataset to a file for deterministic validation.
+# @param path Destination file path.
+# @return Status code.
+kc_test_write_tiny_dataset() {
+    tiny_path=$1
+
+    printf '%s\n' '# id x y' >"$tiny_path" || return 1
+    printf '%s\n' 'A 1.0 0.0' >>"$tiny_path" || return 1
+    printf '%s\n' 'B 0.9 0.1' >>"$tiny_path" || return 1
+    printf '%s\n' 'C 0.0 1.0' >>"$tiny_path" || return 1
+    return 0
+}
+
 # Executes a test case and compares the resulting IDs.
 # @param label Test case description.
 # @param expected_ids Expected space-separated identifiers.
@@ -160,10 +173,12 @@ kc_test_main() {
 
     temp_dir=$(mktemp -d)
     dataset_path="$temp_dir/vectors.txt"
+    tiny_path="$temp_dir/tiny.txt"
 
     trap 'rm -rf "$temp_dir"' EXIT INT HUP TERM
 
     kc_test_write_dataset "$dataset_path" || exit 1
+    kc_test_write_tiny_dataset "$tiny_path" || exit 1
 
     kc_test_run_success_case \
         'help exits successfully' \
@@ -206,6 +221,26 @@ kc_test_main() {
     kc_test_run_fail_case \
         'query dimension mismatch fails' \
         "$BIN" -d 3 -i "$dataset_path" -q '1 0' || failed=$((failed + 1))
+
+    kc_test_run_case \
+        'cosine search returns exact top-1 as brute force' \
+        'red' \
+        "$BIN" -d 3 -i "$dataset_path" -q '1 0 0' -k 1 -m cosine || failed=$((failed + 1))
+
+    kc_test_run_case \
+        'tiny dataset exact top-1 match' \
+        'A' \
+        "$BIN" -d 2 -i "$tiny_path" -q '1.0 0.0' -k 1 -m cosine || failed=$((failed + 1))
+
+    kc_test_run_case \
+        'tiny dataset exact top-2 match (best-first)' \
+        'A B' \
+        "$BIN" -d 2 -i "$tiny_path" -q '1.0 0.0' -k 2 -m cosine || failed=$((failed + 1))
+
+    kc_test_run_case \
+        'build correctness with tiny dataset (best-first verification)' \
+        'A B C' \
+        env HNSW_EF_SEARCH=8 "$BIN" -d 2 -i "$tiny_path" -q '1.0 0.0' -k 3 -m cosine || failed=$((failed + 1))
 
     if [ "$failed" -eq 0 ]; then
         return 0
