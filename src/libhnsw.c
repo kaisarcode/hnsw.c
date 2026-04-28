@@ -482,63 +482,100 @@ int kc_hnsw_search(const kc_hnsw_t *hnsw, const float *query, size_t limit, doub
         kc_hnsw_runlock(mhnsw);
         return 0;
     }
-    if (hnsw->count > 0 && !hnsw->entry_point_set) {
+    if (hnsw->count > 0 && !hnsw->entry_point_set && hnsw->count > 1024) {
         kc_hnsw_runlock(mhnsw);
         return KC_HNSW_ESTATE;
     }
 
-    double q_norm = kc_hnsw_vector_norm(query, hnsw->dimension);
-    size_t curr_idx = hnsw->entry_point_idx;
-    double curr_dist = kc_hnsw_dist(hnsw, query, q_norm, hnsw->items[curr_idx].values, hnsw->items[curr_idx].norm);
 
-    for (int l = hnsw->max_level; l > 0; l--) {
-        int changed = 1;
-        while (changed) {
-            changed = 0;
-            kc_hnsw_neighbor_list_t *neighbors = &hnsw->items[curr_idx].neighbors[l];
-            for (size_t n = 0; n < neighbors->count; n++) {
-                size_t neighbor_idx = neighbors->edges[n].target_idx;
-                double d = kc_hnsw_dist(hnsw, query, q_norm, hnsw->items[neighbor_idx].values, hnsw->items[neighbor_idx].norm);
-                if (score_better(hnsw->metric, d, curr_dist)) {
-                    curr_dist = d;
-                    curr_idx = neighbor_idx;
-                    changed = 1;
+    int ef = hnsw->ef_search;
+    if ((size_t)ef < limit) ef = (int)limit;
+    if (ef < 64) ef = 64;
+
+    int use_brute_force = (hnsw->count <= (size_t)ef || hnsw->count <= 1024);
+    double q_norm = kc_hnsw_vector_norm(query, hnsw->dimension);
+    size_t candidates_count = 0;
+    kc_hnsw_node_score_t *results = NULL;
+
+    if (use_brute_force) {
+        results = (kc_hnsw_node_score_t *)malloc(hnsw->count * sizeof(kc_hnsw_node_score_t));
+        if (!results) {
+            kc_hnsw_runlock(mhnsw);
+            return KC_HNSW_ENOMEM;
+        }
+        for (size_t i = 0; i < hnsw->count; i++) {
+            if (hnsw->items[i].id == NULL) continue;
+            double d = kc_hnsw_dist(hnsw, query, q_norm, hnsw->items[i].values, hnsw->items[i].norm);
+            results[candidates_count].idx = i;
+            results[candidates_count].score = d;
+            candidates_count++;
+        }
+    } else {
+        size_t curr_idx = hnsw->entry_point_idx;
+        double curr_dist = kc_hnsw_dist(hnsw, query, q_norm, hnsw->items[curr_idx].values, hnsw->items[curr_idx].norm);
+        
+        for (int l = hnsw->max_level; l > 0; l--) {
+            int changed = 1;
+            while (changed) {
+                changed = 0;
+                kc_hnsw_neighbor_list_t *neighbors = &hnsw->items[curr_idx].neighbors[l];
+                for (size_t n = 0; n < neighbors->count; n++) {
+                    size_t neighbor_idx = neighbors->edges[n].target_idx;
+                    double d = kc_hnsw_dist(hnsw, query, q_norm, hnsw->items[neighbor_idx].values, hnsw->items[neighbor_idx].norm);
+                    if (score_better(hnsw->metric, d, curr_dist)) {
+                        curr_dist = d;
+                        curr_idx = neighbor_idx;
+                        changed = 1;
+                    }
                 }
+            }
+        }
+        
+        kc_hnsw_heap_t *top_k = kc_hnsw_heap_create(ef, hnsw->metric, 1);
+        if (!top_k) {
+            kc_hnsw_runlock(mhnsw);
+            return KC_HNSW_ENOMEM;
+        }
+        if (kc_hnsw_search_level(hnsw, query, q_norm, curr_idx, 0, ef, top_k) != KC_HNSW_OK) {
+            kc_hnsw_heap_destroy(top_k);
+            kc_hnsw_runlock(mhnsw);
+            return KC_HNSW_ENOMEM;
+        }
+        candidates_count = top_k->size;
+        results = (kc_hnsw_node_score_t *)malloc(candidates_count * sizeof(kc_hnsw_node_score_t));
+        if (!results && candidates_count > 0) {
+            kc_hnsw_heap_destroy(top_k);
+            kc_hnsw_runlock(mhnsw);
+            return KC_HNSW_ENOMEM;
+        }
+        for (size_t i = 0; i < candidates_count; i++) {
+            results[i] = kc_hnsw_heap_pop(top_k);
+            if (hnsw->items[results[i].idx].id != NULL) {
+                results[i].score = kc_hnsw_dist(hnsw, query, q_norm, hnsw->items[results[i].idx].values, hnsw->items[results[i].idx].norm);
+            }
+        }
+        kc_hnsw_heap_destroy(top_k);
+    }
+
+    for (size_t x = 0; x < candidates_count; x++) {
+        for (size_t y = x + 1; y < candidates_count; y++) {
+            if (score_worse(hnsw->metric, results[x].score, results[y].score)) {
+                kc_hnsw_node_score_t tmp = results[x];
+                results[x] = results[y];
+                results[y] = tmp;
             }
         }
     }
 
-    kc_hnsw_heap_t *top_k = kc_hnsw_heap_create(hnsw->ef_search, hnsw->metric, 1);
-    if (!top_k) {
-        kc_hnsw_runlock(mhnsw);
-        return KC_HNSW_ENOMEM;
-    }
-    if (kc_hnsw_search_level(hnsw, query, q_norm, curr_idx, 0, hnsw->ef_search, top_k) != KC_HNSW_OK) {
-        kc_hnsw_heap_destroy(top_k);
-        kc_hnsw_runlock(mhnsw);
-        return KC_HNSW_ENOMEM;
-    }
-
     size_t written = 0;
-    kc_hnsw_node_score_t *results = (kc_hnsw_node_score_t *)malloc(top_k->size * sizeof(kc_hnsw_node_score_t));
-    if (!results && top_k->size > 0) {
-        kc_hnsw_heap_destroy(top_k);
-        kc_hnsw_runlock(mhnsw);
-        return KC_HNSW_ENOMEM;
-    }
-    size_t res_count = top_k->size;
-    for (int i = (int)res_count - 1; i >= 0; i--) {
-        results[i] = kc_hnsw_heap_pop(top_k);
-    }
-
-    for (size_t i = 0; i < res_count && written < limit; i++) {
+    for (size_t i = 0; i < candidates_count && written < limit; i++) {
+        if (hnsw->items[results[i].idx].id == NULL) continue;
         int match = 0;
         if (hnsw->metric == KC_HNSW_METRIC_L2) {
             if (results[i].score <= threshold) match = 1;
         } else {
             if (results[i].score >= threshold) match = 1;
         }
-
         if (match) {
             out[written].id = hnsw->items[results[i].idx].id;
             out[written].score = results[i].score;
@@ -547,7 +584,6 @@ int kc_hnsw_search(const kc_hnsw_t *hnsw, const float *query, size_t limit, doub
     }
 
     free(results);
-    kc_hnsw_heap_destroy(top_k);
     kc_hnsw_runlock(mhnsw);
     return (int)written;
 }

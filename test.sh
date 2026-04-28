@@ -102,6 +102,20 @@ kc_test_write_tiny_dataset() {
     return 0
 }
 
+# Writes a 20-element dataset for scale testing.
+# @param path Destination file path.
+# @return Status code.
+kc_test_write_scale_dataset() {
+    scale_path=$1
+
+    printf '%s\n' '# id v1 v2 v3' >"$scale_path" || return 1
+    for i in $(seq 1 19); do
+        printf 'item_%d 0.0 %s 0.0\n' "$i" "0.$i" >>"$scale_path" || return 1
+    done
+    printf 'target 1.0 0.0 0.0\n' >>"$scale_path" || return 1
+    return 0
+}
+
 # Executes a test case and compares the resulting IDs.
 # @param label Test case description.
 # @param expected_ids Expected space-separated identifiers.
@@ -174,11 +188,13 @@ kc_test_main() {
     temp_dir=$(mktemp -d)
     dataset_path="$temp_dir/vectors.txt"
     tiny_path="$temp_dir/tiny.txt"
+    scale_path="$temp_dir/scale.txt"
 
     trap 'rm -rf "$temp_dir"' EXIT INT HUP TERM
 
     kc_test_write_dataset "$dataset_path" || exit 1
     kc_test_write_tiny_dataset "$tiny_path" || exit 1
+    kc_test_write_scale_dataset "$scale_path" || exit 1
 
     kc_test_run_success_case \
         'help exits successfully' \
@@ -241,6 +257,11 @@ kc_test_main() {
         'build correctness with tiny dataset (best-first verification)' \
         'A B C' \
         env HNSW_EF_SEARCH=8 "$BIN" -d 2 -i "$tiny_path" -q '1.0 0.0' -k 3 -m cosine || failed=$((failed + 1))
+
+    kc_test_run_case \
+        '20-element scale test exact match top-1' \
+        'target' \
+        env HNSW_EF_SEARCH=8 "$BIN" -d 3 -i "$scale_path" -q '1.0 0.0 0.0' -k 1 -m l2 || failed=$((failed + 1))
 
     if [ "$failed" -eq 0 ]; then
         return 0
