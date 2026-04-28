@@ -28,7 +28,7 @@ include_directories(src)
 set(LIB_SOURCES src/libhnsw.c)
 
 add_library(hnsw_static STATIC ${LIB_SOURCES})
-set_target_properties(hnsw_static PROPERTIES OUTPUT_NAME "hnsw")
+set_target_properties(hnsw_static PROPERTIES OUTPUT_NAME "hnsw" POSITION_INDEPENDENT_CODE ON)
 target_include_directories(hnsw_static PRIVATE src)
 
 if(UNIX AND NOT ANDROID)
