@@ -52,13 +52,24 @@ make clean
 
 Each target produces under `bin/{arch}/{platform}/`:
 - `libhnsw.a` — static library
-- `libhnsw.so` / `libhnsw.dll` — shared library
+- `libhnsw.so` / `libhnsw.dll` / `libhnsw.dll.a` — shared library and import lib
 - `hnsw` / `hnsw.exe` — CLI executable
 
-## Usage
+## CLI
 
 ```bash
 ./bin/x86_64/linux/hnsw -d 3 -i vectors.txt -q "1 0 0"
+./bin/x86_64/linux/hnsw -d 3 -i vectors.txt -q "1 0 0" -m cosine -k 5 -t 0.8
+```
+
+The CLI expects a dataset file where each line starts with an identifier followed by the vector values (e.g., `id_1 0.1 0.2 0.3`). It outputs results as `id: score` pairs.
+
+### Search Tuning
+
+The search budget (`ef`) can be adjusted via the `HNSW_EF_SEARCH` environment variable (default: 64). Higher values increase accuracy at the cost of performance.
+
+```bash
+env HNSW_EF_SEARCH=128 ./bin/x86_64/linux/hnsw ...
 ```
 
 ## Public API
