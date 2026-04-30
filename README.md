@@ -69,7 +69,7 @@ The CLI expects a dataset file where each line starts with an identifier followe
 Available metrics:
 - `l2`: squared Euclidean distance
 - `cosine`: cosine distance
-- `ip`: negative inner product
+- `ip`: inner product similarity
 
 `l2` uses squared Euclidean distance:
 
