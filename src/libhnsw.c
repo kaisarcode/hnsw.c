@@ -329,6 +329,8 @@ int kc_hnsw_add(kc_hnsw_t *hnsw, const char *id, const float *values) {
     hnsw->items[hnsw->count].level = -1;
     hnsw->items[hnsw->count].neighbors = NULL;
     hnsw->count++;
+    hnsw->entry_point_set = 0;
+    hnsw->max_level = -1;
 
     kc_hnsw_wunlock(hnsw);
     return KC_HNSW_OK;
