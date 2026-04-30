@@ -338,61 +338,71 @@ int kc_hnsw_add(kc_hnsw_t *hnsw, const char *id, const float *values) {
 int kc_hnsw_build(kc_hnsw_t *hnsw) {
     if (hnsw == NULL) return KC_HNSW_EINVAL;
     if (kc_hnsw_wlock(hnsw) != KC_HNSW_OK) return KC_HNSW_EINVAL;
+
     if (hnsw->count == 0) {
         kc_hnsw_wunlock(hnsw);
         return KC_HNSW_OK;
     }
 
-    for (size_t i = 0; i < hnsw->count; i++) {
-        if (hnsw->items[i].neighbors) {
-            for (int j = 0; j <= hnsw->items[i].level; j++) {
-                kc_hnsw_neighbor_list_free(&hnsw->items[i].neighbors[j]);
-            }
-            free(hnsw->items[i].neighbors);
-            hnsw->items[i].neighbors = NULL;
-        }
-    }
-    hnsw->max_level = -1;
-    hnsw->entry_point_set = 0;
-
-    for (size_t i = 0; i < hnsw->count; i++) {
-        size_t j = i + rand() % (hnsw->count - i);
-        kc_hnsw_item_t temp = hnsw->items[i];
-        hnsw->items[i] = hnsw->items[j];
-        hnsw->items[j] = temp;
+    kc_hnsw_item_t *tmp_items = (kc_hnsw_item_t *)malloc(hnsw->count * sizeof(kc_hnsw_item_t));
+    if (!tmp_items) {
+        kc_hnsw_wunlock(hnsw);
+        return KC_HNSW_ENOMEM;
     }
 
+    memcpy(tmp_items, hnsw->items, hnsw->count * sizeof(kc_hnsw_item_t));
     for (size_t i = 0; i < hnsw->count; i++) {
+        tmp_items[i].neighbors = NULL;
+        tmp_items[i].level = -1;
+    }
+
+    kc_hnsw_t tmp_hnsw = *hnsw;
+    tmp_hnsw.items = tmp_items;
+    tmp_hnsw.max_level = -1;
+    tmp_hnsw.entry_point_set = 0;
+
+    for (size_t i = 0; i < tmp_hnsw.count; i++) {
+        size_t j = i + rand() % (tmp_hnsw.count - i);
+        kc_hnsw_item_t temp = tmp_items[i];
+        tmp_items[i] = tmp_items[j];
+        tmp_items[j] = temp;
+    }
+
+    int rc = KC_HNSW_OK;
+
+    for (size_t i = 0; i < tmp_hnsw.count; i++) {
         int level = kc_hnsw_random_level();
-        hnsw->items[i].level = level;
-        hnsw->items[i].neighbors = (kc_hnsw_neighbor_list_t *)calloc(level + 1, sizeof(kc_hnsw_neighbor_list_t));
-        if (!hnsw->items[i].neighbors) {
-            kc_hnsw_wunlock(hnsw);
-            return KC_HNSW_ENOMEM;
+        tmp_items[i].level = level;
+        tmp_items[i].neighbors = (kc_hnsw_neighbor_list_t *)calloc(level + 1, sizeof(kc_hnsw_neighbor_list_t));
+        if (!tmp_items[i].neighbors) {
+            rc = KC_HNSW_ENOMEM;
+            goto fail;
         }
         for (int j = 0; j <= level; j++) {
-            kc_hnsw_neighbor_list_init(&hnsw->items[i].neighbors[j]);
+            kc_hnsw_neighbor_list_init(&tmp_items[i].neighbors[j]);
         }
 
-        if (!hnsw->entry_point_set) {
-            hnsw->entry_point_idx = i;
-            hnsw->max_level = level;
-            hnsw->entry_point_set = 1;
+        if (!tmp_hnsw.entry_point_set) {
+            tmp_hnsw.entry_point_idx = i;
+            tmp_hnsw.max_level = level;
+            tmp_hnsw.entry_point_set = 1;
             continue;
         }
 
-        size_t curr_idx = hnsw->entry_point_idx;
-        double curr_dist = kc_hnsw_dist(hnsw, hnsw->items[i].values, hnsw->items[i].norm, hnsw->items[curr_idx].values, hnsw->items[curr_idx].norm);
+        size_t curr_idx = tmp_hnsw.entry_point_idx;
+        double curr_dist = kc_hnsw_dist(&tmp_hnsw, tmp_items[i].values, tmp_items[i].norm,
+                tmp_items[curr_idx].values, tmp_items[curr_idx].norm);
 
-        for (int l = hnsw->max_level; l > level; l--) {
+        for (int l = tmp_hnsw.max_level; l > level; l--) {
             int changed = 1;
             while (changed) {
                 changed = 0;
-                kc_hnsw_neighbor_list_t *neighbors = &hnsw->items[curr_idx].neighbors[l];
+                kc_hnsw_neighbor_list_t *neighbors = &tmp_items[curr_idx].neighbors[l];
                 for (size_t n = 0; n < neighbors->count; n++) {
                     size_t neighbor_idx = neighbors->edges[n].target_idx;
-                    double d = kc_hnsw_dist(hnsw, hnsw->items[i].values, hnsw->items[i].norm, hnsw->items[neighbor_idx].values, hnsw->items[neighbor_idx].norm);
-                    if (score_better(hnsw->metric, d, curr_dist)) {
+                    double d = kc_hnsw_dist(&tmp_hnsw, tmp_items[i].values, tmp_items[i].norm,
+                            tmp_items[neighbor_idx].values, tmp_items[neighbor_idx].norm);
+                    if (score_better(tmp_hnsw.metric, d, curr_dist)) {
                         curr_dist = d;
                         curr_idx = neighbor_idx;
                         changed = 1;
@@ -401,24 +411,25 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
             }
         }
 
-        for (int l = (level < hnsw->max_level ? level : hnsw->max_level); l >= 0; l--) {
-            kc_hnsw_heap_t *candidates = kc_hnsw_heap_create(hnsw->ef_construction, hnsw->metric, 1);
+        for (int l = (level < tmp_hnsw.max_level ? level : tmp_hnsw.max_level); l >= 0; l--) {
+            kc_hnsw_heap_t *candidates = kc_hnsw_heap_create(tmp_hnsw.ef_construction, tmp_hnsw.metric, 1);
             if (!candidates) {
-                kc_hnsw_wunlock(hnsw);
-                return KC_HNSW_ENOMEM;
+                rc = KC_HNSW_ENOMEM;
+                goto fail;
             }
-            if (kc_hnsw_search_level(hnsw, hnsw->items[i].values, hnsw->items[i].norm, curr_idx, l, hnsw->ef_construction, candidates) != KC_HNSW_OK) {
+            if (kc_hnsw_search_level(&tmp_hnsw, tmp_items[i].values, tmp_items[i].norm, curr_idx, l,
+                    tmp_hnsw.ef_construction, candidates) != KC_HNSW_OK) {
                 kc_hnsw_heap_destroy(candidates);
-                kc_hnsw_wunlock(hnsw);
-                return KC_HNSW_ENOMEM;
+                rc = KC_HNSW_ENOMEM;
+                goto fail;
             }
             
             size_t c_size = candidates->size;
             kc_hnsw_node_score_t *sorted = (kc_hnsw_node_score_t *)malloc(c_size * sizeof(kc_hnsw_node_score_t));
             if (!sorted && c_size > 0) {
                 kc_hnsw_heap_destroy(candidates);
-                kc_hnsw_wunlock(hnsw);
-                return KC_HNSW_ENOMEM;
+                rc = KC_HNSW_ENOMEM;
+                goto fail;
             }
             for (size_t k = 0; k < c_size; k++) {
                 sorted[k] = candidates->data[k];
@@ -426,23 +437,23 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
             
             for (size_t x = 0; x < c_size; x++) {
                 for (size_t y = x + 1; y < c_size; y++) {
-                    if (score_worse(hnsw->metric, sorted[x].score, sorted[y].score)) {
-                        kc_hnsw_node_score_t tmp = sorted[x];
+                    if (score_worse(tmp_hnsw.metric, sorted[x].score, sorted[y].score)) {
+                        kc_hnsw_node_score_t tmp_node = sorted[x];
                         sorted[x] = sorted[y];
-                        sorted[y] = tmp;
+                        sorted[y] = tmp_node;
                     }
                 }
             }
 
             int connected = 0;
-            for (size_t k = 0; k < c_size && connected < hnsw->M; k++) {
+            for (size_t k = 0; k < c_size && connected < tmp_hnsw.M; k++) {
                 kc_hnsw_node_score_t best = sorted[k];
-                if (kc_hnsw_add_edge(hnsw, i, best.idx, l) != KC_HNSW_OK ||
-                    kc_hnsw_add_edge(hnsw, best.idx, i, l) != KC_HNSW_OK) {
+                if (kc_hnsw_add_edge(&tmp_hnsw, i, best.idx, l) != KC_HNSW_OK ||
+                    kc_hnsw_add_edge(&tmp_hnsw, best.idx, i, l) != KC_HNSW_OK) {
                     free(sorted);
                     kc_hnsw_heap_destroy(candidates);
-                    kc_hnsw_wunlock(hnsw);
-                    return KC_HNSW_ENOMEM;
+                    rc = KC_HNSW_ENOMEM;
+                    goto fail;
                 }
                 
                 if (connected == 0) {
@@ -455,14 +466,42 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
             kc_hnsw_heap_destroy(candidates);
         }
 
-        if (level > hnsw->max_level) {
-            hnsw->max_level = level;
-            hnsw->entry_point_idx = i;
+        if (level > tmp_hnsw.max_level) {
+            tmp_hnsw.max_level = level;
+            tmp_hnsw.entry_point_idx = i;
         }
     }
 
+    for (size_t i = 0; i < hnsw->count; i++) {
+        if (hnsw->items[i].neighbors) {
+            for (int j = 0; j <= hnsw->items[i].level; j++) {
+                kc_hnsw_neighbor_list_free(&hnsw->items[i].neighbors[j]);
+            }
+            free(hnsw->items[i].neighbors);
+        }
+    }
+    free(hnsw->items);
+
+    hnsw->items = tmp_items;
+    hnsw->max_level = tmp_hnsw.max_level;
+    hnsw->entry_point_idx = tmp_hnsw.entry_point_idx;
+    hnsw->entry_point_set = tmp_hnsw.entry_point_set;
+
     kc_hnsw_wunlock(hnsw);
     return KC_HNSW_OK;
+
+fail:
+    for (size_t i = 0; i < tmp_hnsw.count; i++) {
+        if (tmp_items[i].neighbors) {
+            for (int j = 0; j <= tmp_items[i].level; j++) {
+                kc_hnsw_neighbor_list_free(&tmp_items[i].neighbors[j]);
+            }
+            free(tmp_items[i].neighbors);
+        }
+    }
+    free(tmp_items);
+    kc_hnsw_wunlock(hnsw);
+    return rc;
 }
 
 /**
