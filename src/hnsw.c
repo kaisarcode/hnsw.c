@@ -241,7 +241,7 @@ static int hnsw_load_file(kc_hnsw_t *hnsw, const char *path) {
 }
 
 /**
- * Standalone entry point.
+ * Entry point.
  * @param argc Number of command-line arguments.
  * @param argv Command-line argument vector.
  * @return Process exit status.
