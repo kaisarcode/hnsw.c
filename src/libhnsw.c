@@ -67,6 +67,7 @@ struct kc_hnsw {
 #else
     SRWLOCK rwlock;
 #endif
+    uint64_t rng_state;
 };
 
 typedef struct {
@@ -88,7 +89,9 @@ static double kc_hnsw_vector_norm(const float *values, size_t dimension);
 static double kc_hnsw_inner_product(const float *left, const float *right, size_t dimension);
 static double kc_hnsw_dist(const kc_hnsw_t *hnsw, const float *v1, double n1, const float *v2, double n2);
 
-static int kc_hnsw_random_level(void);
+static int kc_hnsw_random_level(kc_hnsw_t *hnsw);
+static uint64_t kc_hnsw_rand64(kc_hnsw_t *hnsw);
+static double kc_hnsw_rand_double(kc_hnsw_t *hnsw);
 static kc_hnsw_heap_t *kc_hnsw_heap_create(size_t capacity, int metric, int worst_first);
 static void kc_hnsw_heap_destroy(kc_hnsw_heap_t *heap);
 static int kc_hnsw_heap_push(kc_hnsw_heap_t *heap, size_t idx, double score);
@@ -199,7 +202,8 @@ kc_hnsw_t *kc_hnsw_open(size_t dimension, int metric) {
     InitializeSRWLock(&hnsw->rwlock);
 #endif
 
-    srand((unsigned int)time(NULL));
+    hnsw->rng_state = (uint64_t)time(NULL) ^ (uint64_t)(uintptr_t)hnsw;
+    if (hnsw->rng_state == 0) hnsw->rng_state = 1;
 
     return hnsw;
 }
@@ -362,7 +366,7 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
     tmp_hnsw.entry_point_set = 0;
 
     for (size_t i = 0; i < tmp_hnsw.count; i++) {
-        size_t j = i + rand() % (tmp_hnsw.count - i);
+        size_t j = i + (size_t)(kc_hnsw_rand64(&tmp_hnsw) % (tmp_hnsw.count - i));
         kc_hnsw_item_t temp = tmp_items[i];
         tmp_items[i] = tmp_items[j];
         tmp_items[j] = temp;
@@ -371,7 +375,7 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
     int rc = KC_HNSW_OK;
 
     for (size_t i = 0; i < tmp_hnsw.count; i++) {
-        int level = kc_hnsw_random_level();
+        int level = kc_hnsw_random_level(&tmp_hnsw);
         tmp_items[i].level = level;
         tmp_items[i].neighbors = (kc_hnsw_neighbor_list_t *)calloc(level + 1, sizeof(kc_hnsw_neighbor_list_t));
         if (!tmp_items[i].neighbors) {
@@ -486,6 +490,7 @@ int kc_hnsw_build(kc_hnsw_t *hnsw) {
     hnsw->max_level = tmp_hnsw.max_level;
     hnsw->entry_point_idx = tmp_hnsw.entry_point_idx;
     hnsw->entry_point_set = tmp_hnsw.entry_point_set;
+    hnsw->rng_state = tmp_hnsw.rng_state;
 
     kc_hnsw_wunlock(hnsw);
     return KC_HNSW_OK;
@@ -741,15 +746,39 @@ static int kc_hnsw_add_edge(kc_hnsw_t *hnsw, size_t src_idx, size_t dst_idx, int
 }
 
 /**
+ * Xorshift64* PRNG.
+ * @param hnsw Index pointer.
+ * @return Random 64-bit value.
+ */
+static uint64_t kc_hnsw_rand64(kc_hnsw_t *hnsw) {
+    uint64_t x = hnsw->rng_state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    hnsw->rng_state = x;
+    return x * 0x2545F4914F6CDD1DULL;
+}
+
+/**
+ * Returns a random double in [0, 1).
+ * @param hnsw Index pointer.
+ * @return Random double.
+ */
+static double kc_hnsw_rand_double(kc_hnsw_t *hnsw) {
+    return (double)(kc_hnsw_rand64(hnsw) & 0x1FFFFFFFFFFFFFULL) / (double)0x20000000000000ULL;
+}
+
+/**
  * Generates a random level for a new node.
+ * @param hnsw Index pointer.
  * @return Randomized level index.
  */
-static int kc_hnsw_random_level(void) {
-    double r = (double)rand() / RAND_MAX;
+static int kc_hnsw_random_level(kc_hnsw_t *hnsw) {
+    double r = kc_hnsw_rand_double(hnsw);
     int level = 0;
-    while (r < KC_HNSW_HNSW_MULT && level < 16) {
+    while (r < 0.1 && level < 16) {
         level++;
-        r = (double)rand() / RAND_MAX;
+        r = kc_hnsw_rand_double(hnsw);
     }
     return level;
 }
