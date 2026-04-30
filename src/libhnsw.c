@@ -1010,7 +1010,10 @@ size_t kc_hnsw_count(const kc_hnsw_t *hnsw) {
     }
 
     kc_hnsw_t *mhnsw = (kc_hnsw_t *)(uintptr_t)hnsw;
-    kc_hnsw_rlock(mhnsw);
+    if (kc_hnsw_rlock(mhnsw) != KC_HNSW_OK) {
+        return 0;
+    }
+
     size_t count = hnsw->count;
     kc_hnsw_runlock(mhnsw);
 
