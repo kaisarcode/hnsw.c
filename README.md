@@ -62,7 +62,65 @@ Each target produces under `bin/{arch}/{platform}/`:
 ./bin/x86_64/linux/hnsw -d 3 -i vectors.txt -q "1 0 0" -m cosine -k 5 -t 0.8
 ```
 
-The CLI expects a dataset file where each line starts with an identifier followed by the vector values (e.g., `id_1 0.1 0.2 0.3`). It outputs results as `id: score` pairs.
+### Arguments
+
+- `-d <int>`
+    Vector dimension. Must match the number of components in each input vector.
+
+- `-i <file>`
+    Input dataset file (see Dataset Format section).
+
+- `-q "<values>"`
+    Query vector as space-separated numbers. Must match dimension `-d`.
+
+- `-m <metric>` (optional)
+    Distance metric. Default: `l2`.
+
+    Supported values:
+    - `l2`: squared Euclidean distance
+    - `cosine`: cosine distance
+    - `ip`: inner product similarity
+
+- `-k <int>` (optional)
+    Number of nearest neighbors to return. Default: implementation-defined.
+
+- `-t <float>` (optional)
+    Threshold for filtering results. Interpretation depends on metric:
+    - `l2`: maximum distance
+    - `cosine`: maximum distance
+    - `ip`: minimum similarity
+
+### Output
+
+The CLI prints results as:
+
+    <id>: <score>
+
+Where `<score>` is the distance or similarity depending on the selected metric.
+
+## Dataset Format
+
+The input file passed with `-i` must contain one vector per line.
+
+Each line format is:
+
+    <id> <v1> <v2> ... <vN>
+
+Where:
+
+- `<id>` is a non-empty identifier without whitespace.
+- `<v1> ... <vN>` are numeric vector components.
+- `N` must match the dimension passed with `-d`.
+
+Example for `-d 3`:
+
+    item_1 1.0 0.0 0.0
+    item_2 0.0 1.0 0.0
+    item_3 0.0 0.0 1.0
+
+Then this command queries the same 3-dimensional space:
+
+    ./bin/x86_64/linux/hnsw -d 3 -i vectors.txt -q "1 0 0"
 
 ## Metrics
 
