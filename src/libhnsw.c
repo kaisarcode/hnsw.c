@@ -1002,7 +1002,18 @@ int kc_hnsw_metric(const kc_hnsw_t *hnsw) { return hnsw ? hnsw->metric : 0; }
  * @param hnsw Index pointer.
  * @return Vector count, or 0 on invalid input.
  */
-size_t kc_hnsw_count(const kc_hnsw_t *hnsw) { return hnsw ? hnsw->count : 0; }
+size_t kc_hnsw_count(const kc_hnsw_t *hnsw) {
+    if (!hnsw) {
+        return 0;
+    }
+
+    kc_hnsw_t *mhnsw = (kc_hnsw_t *)(uintptr_t)hnsw;
+    kc_hnsw_rlock(mhnsw);
+    size_t count = hnsw->count;
+    kc_hnsw_runlock(mhnsw);
+
+    return count;
+}
 
 /**
  * Resolves one metric name into a metric constant.
