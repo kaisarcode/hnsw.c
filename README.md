@@ -64,6 +64,17 @@ Each target produces under `bin/{arch}/{platform}/`:
 
 The CLI expects a dataset file where each line starts with an identifier followed by the vector values (e.g., `id_1 0.1 0.2 0.3`). It outputs results as `id: score` pairs.
 
+## Metrics
+
+Available metrics:
+- `l2`: squared Euclidean distance
+- `cosine`: cosine distance
+- `ip`: negative inner product
+
+`l2` uses squared Euclidean distance:
+
+    d(a, b) = sum((a[i] - b[i])^2)
+
 ### Search Tuning
 
 The search budget (`ef`) can be adjusted via the `HNSW_EF_SEARCH` environment variable (default: 64). Higher values increase accuracy at the cost of performance.
