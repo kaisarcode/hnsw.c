@@ -482,11 +482,10 @@ int kc_hnsw_search(const kc_hnsw_t *hnsw, const float *query, size_t limit, doub
         kc_hnsw_runlock(mhnsw);
         return 0;
     }
-    if (hnsw->count > 0 && !hnsw->entry_point_set && hnsw->count > 1024) {
+    if (hnsw->count > 0 && !hnsw->entry_point_set) {
         kc_hnsw_runlock(mhnsw);
         return KC_HNSW_ESTATE;
     }
-
 
     int ef = hnsw->ef_search;
     if ((size_t)ef < limit) ef = (int)limit;

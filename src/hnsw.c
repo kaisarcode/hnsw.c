@@ -265,7 +265,7 @@ int main(int argc, char **argv) {
     metric_name = "cosine";
     dimension = 0;
     limit = 5;
-    double threshold = -1e18; /* Default to allow everything for cosine/inner */
+    double threshold = -1e18;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -373,7 +373,6 @@ int main(int argc, char **argv) {
         return hnsw_fail_usage(argv[0], "Query vector does not match the configured dimension.");
     }
 
-    /* Adjust default threshold if not set by user */
     int threshold_set = 0;
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--threshold") == 0 || strcmp(argv[i], "-t") == 0) {
