@@ -75,6 +75,8 @@ Available metrics:
 
     d(a, b) = sum((a[i] - b[i])^2)
 
+Note: no square root is applied. Rankings are identical to Euclidean distance.
+
 ### Search Tuning
 
 The search budget (`ef`) can be adjusted via the `HNSW_EF_SEARCH` environment variable (default: 64). Higher values increase accuracy at the cost of performance.
