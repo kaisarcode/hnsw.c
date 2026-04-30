@@ -1,4 +1,4 @@
-# hnsw.c — HNSW Vector Search
+# hnsw.c - HNSW Vector Search
 
 A minimalist C library for fixed-dimension vector indexing with Approximate Nearest Neighbor search using a Hierarchical Navigable Small World (HNSW) graph.
 
@@ -51,9 +51,9 @@ make clean
 ```
 
 Each target produces under `bin/{arch}/{platform}/`:
-- `libhnsw.a` — static library
-- `libhnsw.so` / `libhnsw.dll` / `libhnsw.dll.a` — shared library and import lib
-- `hnsw` / `hnsw.exe` — CLI executable
+- `libhnsw.a` - static library
+- `libhnsw.so` / `libhnsw.dll` / `libhnsw.dll.a` - shared library and import lib
+- `hnsw` / `hnsw.exe` - CLI executable
 
 ## CLI
 
@@ -86,8 +86,8 @@ kc_hnsw_close(hnsw);
 
 ## Lifecycle
 
-- `kc_hnsw_open()` — allocates and returns an index owned by the caller.
-- `kc_hnsw_close()` — releases the index. Must not be called while any other thread holds the index.
+- `kc_hnsw_open()` - allocates and returns an index owned by the caller.
+- `kc_hnsw_close()` - releases the index. Must not be called while any other thread holds the index.
 - `kc_hnsw_add()` and `kc_hnsw_build()` acquire an exclusive write lock. No other operation may run concurrently with them.
 - `kc_hnsw_search()` acquires a shared read lock. Multiple threads may search the same index concurrently after `kc_hnsw_build()` completes.
 
