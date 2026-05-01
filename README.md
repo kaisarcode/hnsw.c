@@ -46,6 +46,12 @@ Applying a threshold:
 ./bin/x86_64/linux/hnsw -d 3 -i vectors.txt -q "1 0 0" -t 0.8
 ```
 
+Pipe query vector through standard input:
+
+```bash
+echo "1 0 0" | ./bin/x86_64/linux/hnsw -d 3 -i vectors.txt
+```
+
 ---
 
 ### Parameters

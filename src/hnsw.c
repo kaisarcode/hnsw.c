@@ -17,6 +17,58 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int hnsw_read_stdin(char **out_text);
+
+/**
+ * Reads text from standard input into a dynamically allocated buffer.
+ * @param out_text Destination pointer for the allocated text.
+ * @return 0 on success, or -1 on failure.
+ */
+static int hnsw_read_stdin(char **out_text) {
+    char *data = NULL;
+    size_t length = 0;
+    size_t capacity = 0;
+    char chunk[4096];
+    size_t n;
+
+    if (!out_text) {
+        return -1;
+    }
+
+    while ((n = fread(chunk, 1, sizeof(chunk), stdin)) > 0) {
+        if (length + n + 1 > capacity) {
+            size_t next_cap = capacity ? capacity * 2 : 4096;
+            while (next_cap < length + n + 1) {
+                next_cap *= 2;
+            }
+            char *next_data = (char *)realloc(data, next_cap);
+            if (!next_data) {
+                free(data);
+                return -1;
+            }
+            data = next_data;
+            capacity = next_cap;
+        }
+        memcpy(data + length, chunk, n);
+        length += n;
+    }
+
+    if (ferror(stdin)) {
+        free(data);
+        return -1;
+    }
+
+    if (length == 0) {
+        free(data);
+        *out_text = NULL;
+        return 0;
+    }
+
+    data[length] = '\0';
+    *out_text = data;
+    return 0;
+}
+
 #define HNSW_LINE_CAP 16384
 #define HNSW_QUERY_CAP 4096
 #define HNSW_RESULT_CAP 256
@@ -247,11 +299,12 @@ static int hnsw_load_file(kc_hnsw_t *hnsw, const char *path) {
  * @return Process exit status.
  */
 int main(int argc, char **argv) {
-    kc_hnsw_t *hnsw;
+    kc_hnsw_t *hnsw = NULL;
     kc_hnsw_result_t results[HNSW_RESULT_CAP];
     float query[HNSW_QUERY_CAP];
     const char *dataset_path;
     const char *query_text;
+    char *stdin_text;
     const char *metric_name;
     int dimension;
     int metric;
@@ -262,9 +315,11 @@ int main(int argc, char **argv) {
 
     dataset_path = NULL;
     query_text = NULL;
+    stdin_text = NULL;
     metric_name = "cosine";
     dimension = 0;
     limit = 5;
+    int status = 0;
     double threshold = -1e18;
 
     for (i = 1; i < argc; i++) {
@@ -280,7 +335,8 @@ int main(int argc, char **argv) {
 
         if (strcmp(argv[i], "--dim") == 0 || strcmp(argv[i], "-d") == 0) {
             if (i + 1 >= argc || !hnsw_parse_int(argv[i + 1], &dimension)) {
-                return hnsw_fail_usage(argv[0], "Invalid value for --dim.");
+                status = hnsw_fail_usage(argv[0], "Invalid value for --dim.");
+                goto cleanup;
             }
 
             i++;
@@ -289,7 +345,8 @@ int main(int argc, char **argv) {
 
         if (strcmp(argv[i], "--input") == 0 || strcmp(argv[i], "-i") == 0) {
             if (i + 1 >= argc) {
-                return hnsw_fail_usage(argv[0], "Missing value for --input.");
+                status = hnsw_fail_usage(argv[0], "Missing value for --input.");
+                goto cleanup;
             }
 
             dataset_path = argv[i + 1];
@@ -299,7 +356,8 @@ int main(int argc, char **argv) {
 
         if (strcmp(argv[i], "--query") == 0 || strcmp(argv[i], "-q") == 0) {
             if (i + 1 >= argc) {
-                return hnsw_fail_usage(argv[0], "Missing value for --query.");
+                status = hnsw_fail_usage(argv[0], "Missing value for --query.");
+                goto cleanup;
             }
 
             query_text = argv[i + 1];
@@ -309,7 +367,8 @@ int main(int argc, char **argv) {
 
         if (strcmp(argv[i], "--top") == 0 || strcmp(argv[i], "-k") == 0) {
             if (i + 1 >= argc || !hnsw_parse_int(argv[i + 1], &limit)) {
-                return hnsw_fail_usage(argv[0], "Invalid value for --top.");
+                status = hnsw_fail_usage(argv[0], "Invalid value for --top.");
+                goto cleanup;
             }
 
             i++;
@@ -318,7 +377,8 @@ int main(int argc, char **argv) {
 
         if (strcmp(argv[i], "--metric") == 0 || strcmp(argv[i], "-m") == 0) {
             if (i + 1 >= argc) {
-                return hnsw_fail_usage(argv[0], "Missing value for --metric.");
+                status = hnsw_fail_usage(argv[0], "Missing value for --metric.");
+                goto cleanup;
             }
 
             metric_name = argv[i + 1];
@@ -329,7 +389,8 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--threshold") == 0 || strcmp(argv[i], "-t") == 0) {
             float t;
             if (i + 1 >= argc || !hnsw_parse_float(argv[i + 1], &t)) {
-                return hnsw_fail_usage(argv[0], "Invalid value for --threshold.");
+                status = hnsw_fail_usage(argv[0], "Invalid value for --threshold.");
+                goto cleanup;
             }
 
             threshold = (double)t;
@@ -337,27 +398,39 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        return hnsw_fail_usage(argv[0], "Unknown argument.");
+        status = hnsw_fail_usage(argv[0], "Unknown argument.");
+        goto cleanup;
     }
 
     if (dimension <= 0) {
-        return hnsw_fail_usage(argv[0], "Vector dimension must be greater than zero.");
+        status = hnsw_fail_usage(argv[0], "Vector dimension must be greater than zero.");
+        goto cleanup;
     }
 
     if ((size_t)dimension > HNSW_QUERY_CAP) {
-        return hnsw_fail_usage(argv[0], "Vector dimension is too large.");
+        status = hnsw_fail_usage(argv[0], "Vector dimension is too large.");
+        goto cleanup;
     }
 
     if (dataset_path == NULL) {
-        return hnsw_fail_usage(argv[0], "Missing --input dataset file.");
+        status = hnsw_fail_usage(argv[0], "Missing --input dataset file.");
+        goto cleanup;
     }
 
     if (query_text == NULL) {
+        if (hnsw_read_stdin(&stdin_text) != 0) {
+            return 1;
+        }
+        query_text = stdin_text;
+    }
+
+    if (query_text == NULL || *query_text == '\0') {
         return hnsw_fail_usage(argv[0], "Missing --query vector.");
     }
 
     if (limit < 1) {
-        return hnsw_fail_usage(argv[0], "Top-K value must be greater than zero.");
+        status = hnsw_fail_usage(argv[0], "Top-K value must be greater than zero.");
+        goto cleanup;
     }
 
     if (limit > HNSW_RESULT_CAP) {
@@ -366,11 +439,13 @@ int main(int argc, char **argv) {
 
     metric = kc_hnsw_metric_from_string(metric_name);
     if (metric == 0) {
-        return hnsw_fail_usage(argv[0], "Unknown metric name.");
+        status = hnsw_fail_usage(argv[0], "Unknown metric name.");
+        goto cleanup;
     }
 
     if (!hnsw_parse_vector(query_text, (size_t)dimension, query)) {
-        return hnsw_fail_usage(argv[0], "Query vector does not match the configured dimension.");
+        status = hnsw_fail_usage(argv[0], "Query vector does not match the configured dimension.");
+        goto cleanup;
     }
 
     int threshold_set = 0;
@@ -391,34 +466,37 @@ int main(int argc, char **argv) {
     hnsw = kc_hnsw_open((size_t)dimension, metric);
     if (hnsw == NULL) {
         fprintf(stderr, "Error: initialization failed.\n");
-        return 1;
+        status = 1;
+        goto cleanup;
     }
 
     rc = hnsw_load_file(hnsw, dataset_path);
     if (rc != KC_HNSW_OK) {
         fprintf(stderr, "Error: %s.\n", kc_hnsw_strerror(rc));
-        kc_hnsw_close (hnsw);
-        return 1;
+        status = 1;
+        goto cleanup;
     }
 
     rc = kc_hnsw_build (hnsw);
     if (rc != KC_HNSW_OK) {
         fprintf(stderr, "Error: index build failed (%s).\n", kc_hnsw_strerror(rc));
-        kc_hnsw_close (hnsw);
-        return 1;
+        status = 1;
+        goto cleanup;
     }
 
     written = kc_hnsw_search(hnsw, query, (size_t)limit, threshold, results);
     if (written < 0) {
         fprintf(stderr, "Error: %s.\n", kc_hnsw_strerror(written));
-        kc_hnsw_close (hnsw);
-        return 1;
+        status = 1;
+        goto cleanup;
     }
 
     for (i = 0; i < written; i++) {
         printf("%s: %.6f\n", results[i].id, results[i].score);
     }
 
-    kc_hnsw_close (hnsw);
-    return 0;
+cleanup:
+    if (hnsw) kc_hnsw_close(hnsw);
+    free(stdin_text);
+    return status;
 }

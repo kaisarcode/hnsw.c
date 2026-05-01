@@ -263,6 +263,14 @@ kc_test_main() {
         'target' \
         env HNSW_EF_SEARCH=8 "$BIN" -d 3 -i "$scale_path" -q '1.0 0.0 0.0' -k 1 -m l2 || failed=$((failed + 1))
 
+    actual_ids=$(echo '1 0 0' | "$BIN" -d 3 -i "$dataset_path" -k 1 -m cosine | cut -d: -f1 | xargs)
+    if [ "$actual_ids" = "red" ]; then
+        kc_test_pass "stdin query execution"
+    else
+        kc_test_fail "stdin query execution (expected red, got $actual_ids)"
+        failed=$((failed + 1))
+    fi
+
     if [ "$failed" -eq 0 ]; then
         return 0
     fi
